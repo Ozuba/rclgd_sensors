@@ -1,0 +1,122 @@
+[gd_scene format=3 uid="uid://b6sl3ag3xjl28"]
+
+[ext_resource type="Script" uid="uid://diysurgbljif6" path="res://Scenes/FreeCam/freecam.gd" id="1_8dfwh"]
+[ext_resource type="Script" uid="uid://cxrb8iam8llhk" path="res://addons/rclgd-sensors/ros_lidar/ros_lidar.gd" id="2_4r14p"]
+[ext_resource type="Script" uid="uid://bsmemyc0nuhy2" path="res://addons/rclgd-sensors/ros_imu/ros_imu.gd" id="4_8dfwh"]
+[ext_resource type="Script" uid="uid://c0hu800pgnmoh" path="res://addons/rclgd-sensors/ros_gps/ros_gps.gd" id="5_4r14p"]
+[ext_resource type="Script" uid="uid://ds4q43s0n1ft7" path="res://addons/rclgd-sensors/ros_camera/ros_camera.gd" id="5_e6vhw"]
+[ext_resource type="Material" uid="uid://bsv8ux5upf4hf" path="res://Assets/Textures/Asphalt/Asphalt.tres" id="6_8dfwh"]
+[ext_resource type="Texture2D" uid="uid://d2sohta4a0brk" path="res://Assets/Textures/Sky/kloofendal_48d_partly_cloudy_puresky_2k.exr" id="7_nl1mx"]
+
+[sub_resource type="PhysicsMaterial" id="PhysicsMaterial_bqjsg"]
+rough = true
+
+[sub_resource type="ConvexPolygonShape3D" id="ConvexPolygonShape3D_87itg"]
+points = PackedVector3Array(-100, 0, -100, -100, 0, 100, 100, 0, -100, 100, 0, 100)
+
+[sub_resource type="QuadMesh" id="QuadMesh_4r14p"]
+material = ExtResource("6_8dfwh")
+size = Vector2(200, 200)
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_a5hju"]
+panorama = ExtResource("7_nl1mx")
+energy_multiplier = 2.0
+
+[sub_resource type="Sky" id="Sky_640h4"]
+sky_material = SubResource("PanoramaSkyMaterial_a5hju")
+
+[sub_resource type="Environment" id="Environment_ulqji"]
+background_mode = 2
+background_color = Color(0.529412, 0.807843, 0.921569, 1)
+sky = SubResource("Sky_640h4")
+ambient_light_color = Color(1, 1, 1, 1)
+ssao_enabled = true
+ssil_enabled = true
+sdfgi_read_sky_light = false
+
+[sub_resource type="BoxMesh" id="BoxMesh_e6vhw"]
+size = Vector3(10, 10, 10)
+
+[sub_resource type="PhysicsMaterial" id="PhysicsMaterial_e6vhw"]
+friction = 0.5
+bounce = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8dfwh"]
+albedo_color = Color(1, 0, 0, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_aodtr"]
+material = SubResource("StandardMaterial3D_8dfwh")
+radius = 2.5
+height = 5.0
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_8dfwh"]
+radius = 2.5
+
+[node name="SimScene" type="Node" unique_id=532534534]
+
+[node name="Freecam3D" type="Camera3D" parent="." unique_id=1156714283]
+transform = Transform3D(-0.2973416, 0, -0.95477116, 0, 1, 0, 0.95477116, 0, -0.2973416, -38.299828, 23.667015, -13.2959)
+script = ExtResource("1_8dfwh")
+metadata/_custom_type_script = "uid://diysurgbljif6"
+
+[node name="Ground" type="StaticBody3D" parent="." unique_id=1823782153]
+collision_layer = 32769
+collision_mask = 32769
+physics_material_override = SubResource("PhysicsMaterial_bqjsg")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground" unique_id=1281241906]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.01, 0)
+top_level = true
+shape = SubResource("ConvexPolygonShape3D_87itg")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Ground" unique_id=1782788690]
+transform = Transform3D(1, 0, 0, 0, -4.3711385e-08, 0.99999994, 0, -0.99999994, -4.3711385e-08, 0, 0, 0)
+mesh = SubResource("QuadMesh_4r14p")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=103707052]
+transform = Transform3D(-0.866024, -0.433016, 0.250001, 0, 0.499998, 0.866026, -0.500003, 0.749999, -0.43301, 0, 0, 0)
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=330934000]
+environment = SubResource("Environment_ulqji")
+
+[node name="Cube" type="MeshInstance3D" parent="." unique_id=1300372416]
+transform = Transform3D(0.70710677, 0, 0.70710677, 0, 1, 0, -0.70710677, 0, 0.70710677, 0, 10, 0)
+mesh = SubResource("BoxMesh_e6vhw")
+
+[node name="Ball" type="RigidBody3D" parent="." unique_id=1297725438]
+transform = Transform3D(1, 0, 0, 0, -4.3711385e-08, 0.99999994, 0, -0.99999994, -4.371139e-08, 0, 37.500717, -16.584454)
+mass = 100.0
+physics_material_override = SubResource("PhysicsMaterial_e6vhw")
+constant_force = Vector3(1, 0, 0)
+
+[node name="BallMesh" type="MeshInstance3D" parent="Ball" unique_id=1119084809]
+transform = Transform3D(1, 0, 0, 0, 0.99999994, 0, 0, 0, 0.99999994, 0, 0, 0)
+mesh = SubResource("SphereMesh_aodtr")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ball" unique_id=1004237583]
+shape = SubResource("SphereShape3D_8dfwh")
+
+[node name="RosImu" type="Node3D" parent="Ball" unique_id=1121380851]
+script = ExtResource("4_8dfwh")
+metadata/_custom_type_script = "uid://bsmemyc0nuhy2"
+
+[node name="RosGps" type="Node3D" parent="Ball" unique_id=2117707982]
+transform = Transform3D(1, 0, 0, 0, 0.99999994, 0, 0, 0, 0.99999994, 0, 0, 0)
+script = ExtResource("5_4r14p")
+metadata/_custom_type_script = "uid://c0hu800pgnmoh"
+
+[node name="Origin" type="Node3D" parent="." unique_id=767713212]
+transform = Transform3D(0.70710677, 0.7071067, 0, -0.70710677, 0.7071067, 0, 0, 0, 0.99999994, -29.94314, 22.97951, -0.41302204)
+
+[node name="RosCamera" type="Node3D" parent="Origin" unique_id=231671191]
+transform = Transform3D(-4.371139e-08, 0, -1, 0, 1, 0, 1, 0, -4.371139e-08, 0, 0, 0)
+script = ExtResource("5_e6vhw")
+publish_rate = 30.0
+metadata/_custom_type_script = "uid://ds4q43s0n1ft7"
+
+[node name="RosLidar" type="Node3D" parent="Origin" unique_id=1632490786]
+transform = Transform3D(-4.371139e-08, 0, -0.99999994, 0, 0.99999994, 0, 1, 0, -4.3711385e-08, 0, 0, 0)
+script = ExtResource("2_4r14p")
+frame_id = "lidar"
+metadata/_custom_type_script = "uid://cxrb8iam8llhk"
