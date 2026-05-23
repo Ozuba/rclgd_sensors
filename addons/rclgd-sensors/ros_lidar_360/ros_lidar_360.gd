@@ -47,12 +47,18 @@ var _stitch_shader: RID
 var _stitch_pipeline: RID
 var _face_capture_shader: RID
 var _face_capture_pipeline: RID
+var _params_buffer: RID
+var _stitch_uniform_set: RID
+var _params_float_array: PackedFloat32Array = PackedFloat32Array()
+var _lidar_environment: Environment
 
 func _ready() -> void:
 	# 1. Setup hardware rendering
 	_rd = RenderingServer.get_rendering_device()
+	_params_float_array.resize(300)
 	_create_textures()
 	_init_shaders()
+	_init_render_resources()
 	
 	# 2. Pipeline hierarchy (Viewports and cameras)
 	_setup_rendering_pipeline()
@@ -81,6 +87,16 @@ func _setup_rendering_pipeline() -> void:
 	
 	var names = ["Right", "Left", "Up", "Down", "Back", "Forward"]
 
+	# Create a shared Environment for all lidar cameras with all post-processing disabled for max performance
+	_lidar_environment = Environment.new()
+	_lidar_environment.background_mode = Environment.BG_CLEAR_COLOR
+	_lidar_environment.ssao_enabled = false
+	_lidar_environment.ssil_enabled = false
+	_lidar_environment.ssr_enabled = false
+	_lidar_environment.glow_enabled = false
+	_lidar_environment.sdfgi_enabled = false
+	_lidar_environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+
 	for i in range(6):
 		# Create SubViewport
 		var vp = SubViewport.new()
@@ -93,6 +109,9 @@ func _setup_rendering_pipeline() -> void:
 		vp.screen_space_aa = SubViewport.SCREEN_SPACE_AA_DISABLED
 		vp.use_debanding = false
 		vp.use_occlusion_culling = true
+		vp.msaa_3d = SubViewport.MSAA_DISABLED
+		vp.msaa_2d = SubViewport.MSAA_DISABLED
+		vp.use_hdr_2d = false
 		
 		add_child(vp)
 		_viewports.append(vp)
@@ -103,6 +122,7 @@ func _setup_rendering_pipeline() -> void:
 		cam.fov = 90.0
 		cam.near = min_range
 		cam.far = max_range
+		cam.environment = _lidar_environment
 		vp.add_child(cam)
 		_cameras.append(cam)
 		
@@ -164,6 +184,36 @@ func _init_shaders() -> void:
 	if _face_capture_shader.is_valid():
 		_face_capture_pipeline = _rd.compute_pipeline_create(_face_capture_shader)
 
+func _init_render_resources() -> void:
+	# 1. Create a persistent parameters buffer (allocate 1200 bytes, which matches the float array size)
+	var dummy_params = PackedFloat32Array()
+	dummy_params.resize(300) # 300 floats = 1200 bytes
+	var dummy_bytes = dummy_params.to_byte_array()
+	_params_buffer = _rd.storage_buffer_create(dummy_bytes.size(), dummy_bytes)
+	
+	# 2. Create the persistent uniform set for the stitching shader
+	var uniforms: Array[RDUniform] = []
+	for i in range(6):
+		var u = RDUniform.new()
+		u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		u.binding = i
+		u.add_id(_face_textures[i])
+		uniforms.append(u)
+		
+	var params_uniform = RDUniform.new()
+	params_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	params_uniform.binding = 6
+	params_uniform.add_id(_params_buffer)
+	uniforms.append(params_uniform)
+	
+	var out_uniform = RDUniform.new()
+	out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+	out_uniform.binding = 7
+	out_uniform.add_id(_output_texture_rid)
+	uniforms.append(out_uniform)
+	
+	_stitch_uniform_set = _rd.uniform_set_create(uniforms, _stitch_shader, 0)
+
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE and _rd:
 		# Free texture RIDs
@@ -178,9 +228,21 @@ func _notification(what: int) -> void:
 			_rd.free_rid(_stitch_shader)
 		if _face_capture_shader.is_valid():
 			_rd.free_rid(_face_capture_shader)
+			
+		# Free persistent RIDs
+		if _params_buffer.is_valid():
+			_rd.free_rid(_params_buffer)
+		if _stitch_uniform_set.is_valid():
+			_rd.free_rid(_stitch_uniform_set)
+
+func _intervals_overlap(min1: float, max1: float, min2: float, max2: float) -> bool:
+	return max1 >= min2 and min1 <= max2
+
+func _back_overlaps(min1: float, max1: float) -> bool:
+	return _intervals_overlap(min1, max1, 135.0, 180.0) or _intervals_overlap(min1, max1, -180.0, -135.0)
 
 func _on_timer_timeout():
-	if is_sampling or not _output_texture_rid.is_valid(): return
+	if is_sampling or not _output_texture_rid.is_valid() or not _stitch_uniform_set.is_valid(): return
 		
 	is_sampling = true
 	_current_stamp = _node.now()
@@ -188,9 +250,41 @@ func _on_timer_timeout():
 	# Update TF before render
 	_tf_broadcaster.send_transform(global_transform, frame_id, parent_frame_id, false)
 
-	# Trigger Render on all 6 viewports
-	for vp in _viewports:
-		vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	# Determine which viewports need to be rendered based on FOV configuration
+	var render_mask = [false, false, false, false, false, false]
+	
+	# 0. Right (+X): [-135, -45]
+	if vertical_fov_max >= -45.0 and vertical_fov_min <= 45.0:
+		if _intervals_overlap(horizontal_fov_min, horizontal_fov_max, -135.0, -45.0):
+			render_mask[0] = true
+			
+	# 1. Left (-X): [45, 135]
+	if vertical_fov_max >= -45.0 and vertical_fov_min <= 45.0:
+		if _intervals_overlap(horizontal_fov_min, horizontal_fov_max, 45.0, 135.0):
+			render_mask[1] = true
+			
+	# 2. Up (+Y): [45, 90] vertically
+	if vertical_fov_max >= 45.0:
+		render_mask[2] = true
+		
+	# 3. Down (-Y): [-90, -45] vertically
+	if vertical_fov_min <= -45.0:
+		render_mask[3] = true
+		
+	# 4. Back (+Z): [135, 180] or [-180, -135]
+	if vertical_fov_max >= -45.0 and vertical_fov_min <= 45.0:
+		if _back_overlaps(horizontal_fov_min, horizontal_fov_max):
+			render_mask[4] = true
+			
+	# 5. Forward (-Z): [-45, 45]
+	if vertical_fov_max >= -45.0 and vertical_fov_min <= 45.0:
+		if _intervals_overlap(horizontal_fov_min, horizontal_fov_max, -45.0, 45.0):
+			render_mask[5] = true
+
+	# Trigger Render on active viewports
+	for i in range(6):
+		if render_mask[i]:
+			_viewports[i].render_target_update_mode = SubViewport.UPDATE_ONCE
 	
 	# WAIT for the frame to be drawn before requesting data
 	if not RenderingServer.frame_post_draw.is_connected(_on_frame_drawn):
@@ -204,36 +298,12 @@ func _on_frame_drawn():
 	RenderingServer.call_on_render_thread(_dispatch_stitching.bind(params_bytes))
 
 func _dispatch_stitching(params_bytes: PackedByteArray) -> void:
-	if not _stitch_shader.is_valid() or not _stitch_pipeline.is_valid() or not _output_texture_rid.is_valid():
+	if not _stitch_shader.is_valid() or not _stitch_pipeline.is_valid() or not _output_texture_rid.is_valid() or not _stitch_uniform_set.is_valid():
 		is_sampling = false
 		return
 		
-	# 1. Uniforms for the 6 face textures (bindings 0 to 5)
-	var uniforms: Array[RDUniform] = []
-	for i in range(6):
-		var u = RDUniform.new()
-		u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		u.binding = i
-		u.add_id(_face_textures[i])
-		uniforms.append(u)
-		
-	# 2. Uniform for the Params Buffer (binding 6)
-	var params_buffer = _rd.storage_buffer_create(params_bytes.size(), params_bytes)
-	var params_uniform = RDUniform.new()
-	params_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-	params_uniform.binding = 6
-	params_uniform.add_id(params_buffer)
-	uniforms.append(params_uniform)
-	
-	# 3. Uniform for the Output Texture (binding 7)
-	var out_uniform = RDUniform.new()
-	out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-	out_uniform.binding = 7
-	out_uniform.add_id(_output_texture_rid)
-	uniforms.append(out_uniform)
-	
-	# Create Uniform Set
-	var uniform_set = _rd.uniform_set_create(uniforms, _stitch_shader, 0)
+	# Update the persistent parameter buffer with the new matrix/range/noise data
+	_rd.buffer_update(_params_buffer, 0, params_bytes.size(), params_bytes)
 	
 	# Calculate groups (assuming local_size_x/y = 8 in the shader)
 	var x_groups = (horizontal_resolution - 1) / 8 + 1
@@ -242,7 +312,7 @@ func _dispatch_stitching(params_bytes: PackedByteArray) -> void:
 	# Dispatch compute list
 	var compute_list = _rd.compute_list_begin()
 	_rd.compute_list_bind_compute_pipeline(compute_list, _stitch_pipeline)
-	_rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
+	_rd.compute_list_bind_uniform_set(compute_list, _stitch_uniform_set, 0)
 	_rd.compute_list_dispatch(compute_list, x_groups, y_groups, 1)
 	_rd.compute_list_end()
 	
@@ -250,10 +320,6 @@ func _dispatch_stitching(params_bytes: PackedByteArray) -> void:
 	var err = _rd.texture_get_data_async(_output_texture_rid, 0, _on_texture_data_ready)
 	if err != OK:
 		is_sampling = false
-	
-	# Cleanup transient RIDs
-	_rd.free_rid(uniform_set)
-	_rd.free_rid(params_buffer)
 
 func _on_texture_data_ready(raw_bytes: PackedByteArray):
 	is_sampling = false
@@ -267,65 +333,69 @@ func _on_texture_data_ready(raw_bytes: PackedByteArray):
 	_lidar_pub.publish(_cached_msg)
 
 func _get_params_byte_array() -> PackedByteArray:
-	var float_array = PackedFloat32Array()
+	_params_float_array[0] = float(horizontal_resolution)
+	_params_float_array[1] = float(vertical_resolution)
+	_params_float_array[2] = randf()
+	_params_float_array[3] = noise_std_dev
+	_params_float_array[4] = deg_to_rad(vertical_fov_min)
+	_params_float_array[5] = deg_to_rad(vertical_fov_max)
+	_params_float_array[6] = deg_to_rad(horizontal_fov_min)
+	_params_float_array[7] = deg_to_rad(horizontal_fov_max)
+	_params_float_array[8] = min_range
+	_params_float_array[9] = max_range
+	_params_float_array[10] = 0.0
+	_params_float_array[11] = 0.0
 	
-	# 1. Output resolution
-	float_array.append(float(horizontal_resolution))
-	float_array.append(float(vertical_resolution))
-	
-	# 2. Seed and noise std dev
-	float_array.append(randf())
-	float_array.append(noise_std_dev)
-	
-	# 3. Vertical FOV bounds (converted to radians)
-	float_array.append(deg_to_rad(vertical_fov_min))
-	float_array.append(deg_to_rad(vertical_fov_max))
-	
-	# 3b. Horizontal FOV bounds (converted to radians)
-	float_array.append(deg_to_rad(horizontal_fov_min))
-	float_array.append(deg_to_rad(horizontal_fov_max))
-	
-	# 4. Range bounds
-	float_array.append(min_range)
-	float_array.append(max_range)
-	
-	# 4b. Padding to align structural array offset to 16 bytes (12 floats total in block)
-	float_array.append(0.0)
-	float_array.append(0.0)
-	
-	# 5. Inverse Projection Matrices (6 faces)
 	for i in range(6):
 		var inv_proj = _effects[i].inv_proj_matrix
-		float_array.append_array(_serialize_projection(inv_proj))
+		_write_projection_to_array(inv_proj, 12 + i * 16)
 		
-	# 6. Camera Transforms (relative to Lidar node)
 	for i in range(6):
 		var trans = _remote_syncs[i].transform
-		float_array.append_array(_serialize_transform(trans))
+		_write_transform_to_array(trans, 108 + i * 16)
 		
-	# 7. Inverse Camera Transforms
 	for i in range(6):
 		var trans = _remote_syncs[i].transform
 		var inv_trans = trans.affine_inverse()
-		float_array.append_array(_serialize_transform(inv_trans))
+		_write_transform_to_array(inv_trans, 204 + i * 16)
 		
-	return float_array.to_byte_array()
+	return _params_float_array.to_byte_array()
 
-func _serialize_projection(proj: Projection) -> PackedFloat32Array:
-	return PackedFloat32Array([
-		proj.x.x, proj.x.y, proj.x.z, proj.x.w,
-		proj.y.x, proj.y.y, proj.y.z, proj.y.w,
-		proj.z.x, proj.z.y, proj.z.z, proj.z.w,
-		proj.w.x, proj.w.y, proj.w.z, proj.w.w,
-	])
+func _write_projection_to_array(proj: Projection, index: int) -> void:
+	_params_float_array[index]      = proj.x.x
+	_params_float_array[index + 1]  = proj.x.y
+	_params_float_array[index + 2]  = proj.x.z
+	_params_float_array[index + 3]  = proj.x.w
+	_params_float_array[index + 4]  = proj.y.x
+	_params_float_array[index + 5]  = proj.y.y
+	_params_float_array[index + 6]  = proj.y.z
+	_params_float_array[index + 7]  = proj.y.w
+	_params_float_array[index + 8]  = proj.z.x
+	_params_float_array[index + 9]  = proj.z.y
+	_params_float_array[index + 10] = proj.z.z
+	_params_float_array[index + 11] = proj.z.w
+	_params_float_array[index + 12] = proj.w.x
+	_params_float_array[index + 13] = proj.w.y
+	_params_float_array[index + 14] = proj.w.z
+	_params_float_array[index + 15] = proj.w.w
 
-func _serialize_transform(t: Transform3D) -> PackedFloat32Array:
-	return PackedFloat32Array([
-		t.basis.x.x, t.basis.x.y, t.basis.x.z, 0.0,
-		t.basis.y.x, t.basis.y.y, t.basis.y.z, 0.0,
-		t.basis.z.x, t.basis.z.y, t.basis.z.z, 0.0,
-		t.origin.x,  t.origin.y,  t.origin.z,  1.0,
-	])
+func _write_transform_to_array(t: Transform3D, index: int) -> void:
+	_params_float_array[index]      = t.basis.x.x
+	_params_float_array[index + 1]  = t.basis.x.y
+	_params_float_array[index + 2]  = t.basis.x.z
+	_params_float_array[index + 3]  = 0.0
+	_params_float_array[index + 4]  = t.basis.y.x
+	_params_float_array[index + 5]  = t.basis.y.y
+	_params_float_array[index + 6]  = t.basis.y.z
+	_params_float_array[index + 7]  = 0.0
+	_params_float_array[index + 8]  = t.basis.z.x
+	_params_float_array[index + 9]  = t.basis.z.y
+	_params_float_array[index + 10] = t.basis.z.z
+	_params_float_array[index + 11] = 0.0
+	_params_float_array[index + 12] = t.origin.x
+	_params_float_array[index + 13] = t.origin.y
+	_params_float_array[index + 14] = t.origin.z
+	_params_float_array[index + 15] = 1.0
 
 func _prepare_msg_template():
 	_cached_msg = RosSensorMsgsPointCloud2.new()

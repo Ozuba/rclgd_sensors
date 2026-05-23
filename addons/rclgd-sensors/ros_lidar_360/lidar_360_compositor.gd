@@ -11,6 +11,10 @@ var shader: RID = RID()
 var pipeline: RID = RID()
 var inv_proj_matrix: Projection = Projection.IDENTITY
 
+var _cached_depth_tex: RID = RID()
+var _cached_color_tex: RID = RID()
+var _cached_uniform_set: RID = RID()
+
 # --- Initialization ---
 
 func _init() -> void:
@@ -22,6 +26,8 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE and rd:
 		if nearest_sampler.is_valid():
 			rd.free_rid(nearest_sampler)
+		if _cached_uniform_set.is_valid():
+			rd.free_rid(_cached_uniform_set)
 
 func _initialize_sampler() -> void:
 	rd = RenderingServer.get_rendering_device()
@@ -64,34 +70,37 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 			var depth_tex: RID = render_scene_buffers.get_depth_layer(view)
 			var color_tex: RID = render_scene_buffers.get_color_layer(view)
 
-			# U0: Depth Sampler
-			var depth_uniform: RDUniform = RDUniform.new()
-			depth_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-			depth_uniform.binding = 0
-			depth_uniform.add_id(nearest_sampler)
-			depth_uniform.add_id(depth_tex)
-			
-			# U1: Color Sampler
-			var color_uniform: RDUniform = RDUniform.new()
-			color_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-			color_uniform.binding = 1
-			color_uniform.add_id(nearest_sampler)
-			color_uniform.add_id(color_tex)
-			
-			# U2: Output Image/Buffer
-			var target_copy_uniform: RDUniform = RDUniform.new()
-			target_copy_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-			target_copy_uniform.binding = 2
-			target_copy_uniform.add_id(target_tex)
+			if depth_tex != _cached_depth_tex or color_tex != _cached_color_tex or not _cached_uniform_set.is_valid():
+				if _cached_uniform_set.is_valid():
+					rd.free_rid(_cached_uniform_set)
+				
+				_cached_depth_tex = depth_tex
+				_cached_color_tex = color_tex
+				
+				# U0: Depth Sampler
+				var depth_uniform: RDUniform = RDUniform.new()
+				depth_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+				depth_uniform.binding = 0
+				depth_uniform.add_id(nearest_sampler)
+				depth_uniform.add_id(depth_tex)
+				
+				# U1: Color Sampler
+				var color_uniform: RDUniform = RDUniform.new()
+				color_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+				color_uniform.binding = 1
+				color_uniform.add_id(nearest_sampler)
+				color_uniform.add_id(color_tex)
+				
+				# U2: Output Image/Buffer
+				var target_copy_uniform: RDUniform = RDUniform.new()
+				target_copy_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+				target_copy_uniform.binding = 2
+				target_copy_uniform.add_id(target_tex)
+				
+				_cached_uniform_set = rd.uniform_set_create([depth_uniform, color_uniform, target_copy_uniform], shader, 0)
 
-			# --- Dispatch ---
-			var uniform_set: RID = rd.uniform_set_create([depth_uniform, color_uniform, target_copy_uniform], shader, 0)
-			
 			var compute_list := rd.compute_list_begin()
 			rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
-			rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
+			rd.compute_list_bind_uniform_set(compute_list, _cached_uniform_set, 0)
 			rd.compute_list_dispatch(compute_list, x_groups, y_groups, 1)
 			rd.compute_list_end()
-
-			# --- Cleanup ---
-			rd.free_rid(uniform_set)

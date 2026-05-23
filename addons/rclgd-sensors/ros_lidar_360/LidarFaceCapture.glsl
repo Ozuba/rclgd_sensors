@@ -7,8 +7,7 @@ layout(set=0, binding=0) uniform sampler2D depth_buffer;
 layout(set=0, binding=1) uniform sampler2D color_buffer;
 layout(set=0, binding=2, rgba32f) uniform restrict writeonly image2D face_out;
 
-vec3 get_view_pos(vec2 uv, float depth) {
-    vec2 ndc = uv * 2.0 - 1.0;
+vec3 get_view_pos(vec2 ndc, float depth) {
     // Vulkan NDC depth in reversed-Z:
     // depth = 0.0 is far plane, depth = 1.0 is near plane.
     // Reconstruct view-space depth (z_view is negative in front of camera)
@@ -24,14 +23,9 @@ void main() {
         return;
     }
 
-    // Normalize coordinates
-    vec2 uv = (vec2(xy) + 0.5) / vec2(dest_size);
-
-    // Sample depth
-    float depth = texture(depth_buffer, uv).r;
-
-    // Sample color and compute base intensity
-    vec4 color = texture(color_buffer, uv);
+    // Sample depth and color using integer coordinates (texelFetch)
+    float depth = texelFetch(depth_buffer, xy, 0).r;
+    vec4 color = texelFetch(color_buffer, xy, 0);
     float base_intensity = (color.r + color.g + color.b) / 3.0;
 
     // A depth close to 0.0 (or very close) means nothing was hit (sky/far plane)
@@ -40,20 +34,23 @@ void main() {
         return;
     }
 
+    vec2 inv_dest_size = 1.0 / vec2(dest_size);
+
     // Calculate view-space ray direction (Camera looks down -Z)
-    vec3 p = get_view_pos(uv, depth);
+    vec2 ndc = (vec2(xy) + 0.5) * inv_dest_size * 2.0 - 1.0;
+    vec3 p = get_view_pos(ndc, depth);
     vec3 ray_dir = normalize(p);
 
     // Reconstruct view-space normal from depth buffer neighbors
     ivec2 xy_right = clamp(xy + ivec2(1, 0), ivec2(0), dest_size - 1);
-    vec2 uv_right = (vec2(xy_right) + 0.5) / vec2(dest_size);
-    float depth_right = texture(depth_buffer, uv_right).r;
-    vec3 p_right = get_view_pos(uv_right, depth_right);
+    float depth_right = texelFetch(depth_buffer, xy_right, 0).r;
+    vec2 ndc_right = (vec2(xy_right) + 0.5) * inv_dest_size * 2.0 - 1.0;
+    vec3 p_right = get_view_pos(ndc_right, depth_right);
 
     ivec2 xy_down = clamp(xy + ivec2(0, 1), ivec2(0), dest_size - 1);
-    vec2 uv_down = (vec2(xy_down) + 0.5) / vec2(dest_size);
-    float depth_down = texture(depth_buffer, uv_down).r;
-    vec3 p_down = get_view_pos(uv_down, depth_down);
+    float depth_down = texelFetch(depth_buffer, xy_down, 0).r;
+    vec2 ndc_down = (vec2(xy_down) + 0.5) * inv_dest_size * 2.0 - 1.0;
+    vec3 p_down = get_view_pos(ndc_down, depth_down);
 
     vec3 t1 = p_right - p;
     vec3 t2 = p_down - p;
