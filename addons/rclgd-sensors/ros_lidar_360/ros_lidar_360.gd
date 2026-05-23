@@ -9,6 +9,8 @@ const FACE_CAPTURE_EFFECT_CLASS = preload("res://addons/rclgd-sensors/ros_lidar_
 @export var vertical_resolution: int = 64
 @export var vertical_fov_min: float = -45.0 # Degrees
 @export var vertical_fov_max: float = 45.0 # Degrees
+@export var horizontal_fov_min: float = -180.0 # Degrees
+@export var horizontal_fov_max: float = 180.0 # Degrees
 @export var min_range: float = 0.1 # Meters
 @export var max_range: float = 100.0 # Meters
 @export var noise_std_dev: float = 0.005 # Standard deviation for Gaussian noise in meters
@@ -279,9 +281,17 @@ func _get_params_byte_array() -> PackedByteArray:
 	float_array.append(deg_to_rad(vertical_fov_min))
 	float_array.append(deg_to_rad(vertical_fov_max))
 	
+	# 3b. Horizontal FOV bounds (converted to radians)
+	float_array.append(deg_to_rad(horizontal_fov_min))
+	float_array.append(deg_to_rad(horizontal_fov_max))
+	
 	# 4. Range bounds
 	float_array.append(min_range)
 	float_array.append(max_range)
+	
+	# 4b. Padding to align structural array offset to 16 bytes (12 floats total in block)
+	float_array.append(0.0)
+	float_array.append(0.0)
 	
 	# 5. Inverse Projection Matrices (6 faces)
 	for i in range(6):

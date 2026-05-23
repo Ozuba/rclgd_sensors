@@ -17,8 +17,12 @@ layout(set=0, binding=6, std430) restrict buffer Params {
     float noise_std_dev;   // Standard deviation for Gaussian noise
     float vertical_fov_min;// Rad
     float vertical_fov_max;// Rad
+    float horizontal_fov_min; // Rad
+    float horizontal_fov_max; // Rad
     float min_range;       // Meters
     float max_range;       // Meters
+    float pad1;            // Explicit padding to align to 16-byte boundary
+    float pad2;            // Explicit padding to align to 16-byte boundary
     mat4 inv_proj_matrices[6];
     mat4 cam_transforms[6];
     mat4 inv_cam_transforms[6];
@@ -54,7 +58,7 @@ void main() {
     float u = (float(xy.x) + 0.5) / params.resolution.x;
     float w = (float(xy.y) + 0.5) / params.resolution.y;
 
-    float theta = u * 2.0 * PI - PI; // Yaw: [-PI, PI]
+    float theta = params.horizontal_fov_min + u * (params.horizontal_fov_max - params.horizontal_fov_min);
     float phi = params.vertical_fov_min + w * (params.vertical_fov_max - params.vertical_fov_min); // Pitch
 
     vec3 d_local;
