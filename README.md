@@ -1,7 +1,7 @@
 # RCLGD sensors
 A demo featuring some sensors simulated within godot and streamed to ros2 using rclgd
 Featuring:
-- GPU Accelerated LIDAR
+- GPU Accelerated 360 LIDAR
 - IMU
 - RGBA Camera
 - GPS
