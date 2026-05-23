@@ -60,9 +60,7 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 		var x_groups: int = (size.x - 1) / 8 + 1
 		var y_groups: int = (size.y - 1) / 8 + 1
 		
-		var view_count: int = render_scene_buffers.get_view_count()
-		
-		for view in range(view_count):
+		for view in range(render_scene_buffers.get_view_count()):
 			var depth_tex: RID = render_scene_buffers.get_depth_layer(view)
 			var color_tex: RID = render_scene_buffers.get_color_layer(view)
 

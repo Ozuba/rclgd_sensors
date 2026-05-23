@@ -35,10 +35,10 @@ float rand(vec2 co) {
 }
 
 // Box-Muller Transform for Gaussian noise
-float get_gaussian(vec2 co) {
+float get_gaussian(vec2 co, float std_dev) {
     float u1 = max(rand(co), 1e-6); 
     float u2 = rand(co + 1.0);
-    return sqrt(-2.0 * log(u1)) * cos(2.0 * PI * u2) * params.noise_std_dev;
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * PI * u2) * std_dev;
 }
 
 void main() {
@@ -141,7 +141,14 @@ void main() {
     }
 
     // 6. Add Gaussian noise along the ray
-    float noise = get_gaussian(vec2(xy));
+    // Scale standard deviation based on:
+    // - Distance: noise scales quadratically with distance (signal attenuation)
+    // - Intensity: lower reflectivity or grazing angles (slanted surfaces) increase range uncertainty
+    float intensity_factor = 1.0 / max(intensity, 0.05);
+    float distance_factor = 1.0 + 0.001 * (dist * dist);
+    float effective_std_dev = params.noise_std_dev * intensity_factor * distance_factor;
+
+    float noise = get_gaussian(vec2(xy), effective_std_dev);
     float noisy_dist = max(dist + noise, params.min_range);
     vec3 local_noisy_point = d_local * noisy_dist;
 

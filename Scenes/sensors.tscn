@@ -133,7 +133,7 @@ frame_id = "lidar"
 metadata/_custom_type_script = "uid://cxrb8iam8llhk"
 
 [node name="RosLidar360" type="Node3D" parent="." unique_id=625640786]
-transform = Transform3D(-0.2973416, 0, -0.95477116, 0, 1, 0, 0.95477116, 0, -0.2973416, 4.211982, 8.837816, 11.334728)
+transform = Transform3D(-0.2973416, 0, -0.95477116, 0, 1, 0, 0.95477116, 0, -0.2973416, 4.2119827, 13.830101, -3.684267)
 script = ExtResource("8_4r14p")
 vertical_resolution = 120
 max_range = 50.0
