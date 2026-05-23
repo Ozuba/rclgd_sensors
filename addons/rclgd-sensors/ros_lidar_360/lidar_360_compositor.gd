@@ -15,19 +15,15 @@ var inv_proj_matrix: Projection = Projection.IDENTITY
 
 func _init() -> void:
 	effect_callback_type = CompositorEffect.EFFECT_CALLBACK_TYPE_POST_TRANSPARENT
-	# Start asynchronous initialization immediately upon creation.
-	RenderingServer.call_on_render_thread(_initialize_compute)
+	RenderingServer.call_on_render_thread(_initialize_sampler)
 
 func _notification(what: int) -> void:
-	# Cleanup: Fires when the resource is freed. It must clean up RIDs.
+	# Cleanup: Fires when the resource is freed. It must clean up nearest_sampler.
 	if what == NOTIFICATION_PREDELETE and rd:
-		# Check if RIDs are valid before attempting to free
-		if shader.is_valid():
-			rd.free_rid(shader)
 		if nearest_sampler.is_valid():
 			rd.free_rid(nearest_sampler)
 
-func _initialize_compute() -> void:
+func _initialize_sampler() -> void:
 	rd = RenderingServer.get_rendering_device()
 	if !rd:
 		return
@@ -37,15 +33,6 @@ func _initialize_compute() -> void:
 	sampler_state.min_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
 	sampler_state.mag_filter = RenderingDevice.SAMPLER_FILTER_NEAREST
 	nearest_sampler = rd.sampler_create(sampler_state)
-	
-	# Create Shader and Pipeline
-	var shader_file: RDShaderFile = load("res://addons/rclgd-sensors/ros_lidar_360/LidarFaceCapture.glsl")
-	var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
-	shader = rd.shader_create_from_spirv(shader_spirv)
-	
-	# Only create pipeline if shader creation succeeded
-	if shader.is_valid():
-		pipeline = rd.compute_pipeline_create(shader)
 
 
 # --- Render Callback (The Execution Loop) ---

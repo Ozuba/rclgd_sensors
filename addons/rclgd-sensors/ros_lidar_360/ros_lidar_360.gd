@@ -43,12 +43,14 @@ var _current_stamp: RosMsg
 
 var _stitch_shader: RID
 var _stitch_pipeline: RID
+var _face_capture_shader: RID
+var _face_capture_pipeline: RID
 
 func _ready() -> void:
 	# 1. Setup hardware rendering
 	_rd = RenderingServer.get_rendering_device()
 	_create_textures()
-	_init_stitch_shader()
+	_init_shaders()
 	
 	# 2. Pipeline hierarchy (Viewports and cameras)
 	_setup_rendering_pipeline()
@@ -83,6 +85,13 @@ func _setup_rendering_pipeline() -> void:
 		vp.name = "LidarViewport_" + names[i]
 		vp.size = Vector2i(face_resolution, face_resolution)
 		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		
+		# Optimizations: Disable redundant rendering features for depth/color capturing
+		vp.positional_shadow_atlas_size = 0
+		vp.screen_space_aa = SubViewport.SCREEN_SPACE_AA_DISABLED
+		vp.use_debanding = false
+		vp.use_occlusion_culling = true
+		
 		add_child(vp)
 		_viewports.append(vp)
 		
@@ -99,6 +108,8 @@ func _setup_rendering_pipeline() -> void:
 		var effect = FACE_CAPTURE_EFFECT_CLASS.new()
 		effect.target_tex = _face_textures[i]
 		effect.texture_size = Vector2(face_resolution, face_resolution)
+		effect.shader = _face_capture_shader
+		effect.pipeline = _face_capture_pipeline
 		_effects.append(effect)
 		
 		var comp = Compositor.new()
@@ -136,12 +147,20 @@ func _create_textures() -> void:
 						 RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
 	_output_texture_rid = _rd.texture_create(out_fmt, RDTextureView.new())
 
-func _init_stitch_shader() -> void:
-	var shader_file: RDShaderFile = load("res://addons/rclgd-sensors/ros_lidar_360/LidarStitch.glsl")
-	var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
-	_stitch_shader = _rd.shader_create_from_spirv(shader_spirv)
+func _init_shaders() -> void:
+	# 1. Stitching Shader
+	var stitch_file: RDShaderFile = load("res://addons/rclgd-sensors/ros_lidar_360/LidarStitch.glsl")
+	var stitch_spirv: RDShaderSPIRV = stitch_file.get_spirv()
+	_stitch_shader = _rd.shader_create_from_spirv(stitch_spirv)
 	if _stitch_shader.is_valid():
 		_stitch_pipeline = _rd.compute_pipeline_create(_stitch_shader)
+		
+	# 2. Face Capture Shader
+	var capture_file: RDShaderFile = load("res://addons/rclgd-sensors/ros_lidar_360/LidarFaceCapture.glsl")
+	var capture_spirv: RDShaderSPIRV = capture_file.get_spirv()
+	_face_capture_shader = _rd.shader_create_from_spirv(capture_spirv)
+	if _face_capture_shader.is_valid():
+		_face_capture_pipeline = _rd.compute_pipeline_create(_face_capture_shader)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE and _rd:
@@ -152,9 +171,11 @@ func _notification(what: int) -> void:
 		if _output_texture_rid.is_valid():
 			_rd.free_rid(_output_texture_rid)
 		
-		# Free shader
+		# Free shaders
 		if _stitch_shader.is_valid():
 			_rd.free_rid(_stitch_shader)
+		if _face_capture_shader.is_valid():
+			_rd.free_rid(_face_capture_shader)
 
 func _on_timer_timeout():
 	if is_sampling or not _output_texture_rid.is_valid(): return
