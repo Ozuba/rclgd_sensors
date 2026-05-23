@@ -14,7 +14,8 @@ const FACE_CAPTURE_EFFECT_CLASS = preload("res://addons/rclgd-sensors/ros_lidar_
 @export var min_range: float = 0.1 # Meters
 @export var max_range: float = 100.0 # Meters
 @export var noise_std_dev: float = 0.005 # Standard deviation for Gaussian noise in meters
-@export var face_resolution: int = 256 # Resolution of each cubemap face
+@export var face_resolution: int = 256 # Resolution of each cubemap face. Set to 0 to auto-calculate (horizontal_resolution / 4)
+@export_flags_3d_render var cull_mask: int = 1048575 # 3D Render layers to capture
 @export var publish_rate: float = 10.0
 @export var lidar_topic: String = "~/lidar_360"
 @export var frame_id: String = "~lidar_360"
@@ -51,11 +52,18 @@ var _params_buffer: RID
 var _stitch_uniform_set: RID
 var _params_float_array: PackedFloat32Array = PackedFloat32Array()
 var _lidar_environment: Environment
+var _actual_face_resolution: int = 256
 
 func _ready() -> void:
 	# 1. Setup hardware rendering
 	_rd = RenderingServer.get_rendering_device()
 	_params_float_array.resize(300)
+	
+	_actual_face_resolution = face_resolution
+	if _actual_face_resolution <= 0:
+		_actual_face_resolution = nearest_po2(horizontal_resolution / 4)
+		_actual_face_resolution = clamp(_actual_face_resolution, 64, 1024)
+		
 	_create_textures()
 	_init_shaders()
 	_init_render_resources()
@@ -101,7 +109,7 @@ func _setup_rendering_pipeline() -> void:
 		# Create SubViewport
 		var vp = SubViewport.new()
 		vp.name = "LidarViewport_" + names[i]
-		vp.size = Vector2i(face_resolution, face_resolution)
+		vp.size = Vector2i(_actual_face_resolution, _actual_face_resolution)
 		vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		
 		# Optimizations: Disable redundant rendering features for depth/color capturing
@@ -123,13 +131,14 @@ func _setup_rendering_pipeline() -> void:
 		cam.near = min_range
 		cam.far = max_range
 		cam.environment = _lidar_environment
+		cam.cull_mask = cull_mask
 		vp.add_child(cam)
 		_cameras.append(cam)
 		
 		# Setup Compositor Effect on Camera
 		var effect = FACE_CAPTURE_EFFECT_CLASS.new()
 		effect.target_tex = _face_textures[i]
-		effect.texture_size = Vector2(face_resolution, face_resolution)
+		effect.texture_size = Vector2(_actual_face_resolution, _actual_face_resolution)
 		effect.shader = _face_capture_shader
 		effect.pipeline = _face_capture_pipeline
 		_effects.append(effect)
@@ -152,8 +161,8 @@ func _create_textures() -> void:
 	for i in range(6):
 		var fmt : RDTextureFormat = RDTextureFormat.new()
 		fmt.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT 
-		fmt.width = face_resolution
-		fmt.height = face_resolution
+		fmt.width = _actual_face_resolution
+		fmt.height = _actual_face_resolution
 		fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | \
 						 RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | \
 						 RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
@@ -242,7 +251,7 @@ func _back_overlaps(min1: float, max1: float) -> bool:
 	return _intervals_overlap(min1, max1, 135.0, 180.0) or _intervals_overlap(min1, max1, -180.0, -135.0)
 
 func _on_timer_timeout():
-	if is_sampling or not _output_texture_rid.is_valid() or not _stitch_uniform_set.is_valid(): return
+	if not is_visible_in_tree() or is_sampling or not _output_texture_rid.is_valid() or not _stitch_uniform_set.is_valid(): return
 		
 	is_sampling = true
 	_current_stamp = _node.now()
