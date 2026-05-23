@@ -67,35 +67,44 @@ void main() {
     d_local.z = -cos(theta) * cos(phi); // Forward is -Z in Godot
 
     // 2. Find which camera face this direction vector projects onto
+    // Direct selection by maximum absolute component (maps to cubemap faces)
     int best_cam = -1;
-    float max_z_front = -1e9;
-    float best_x_ndc = 0.0;
-    float best_y_ndc = 0.0;
+    float abs_x = abs(d_local.x);
+    float abs_y = abs(d_local.y);
+    float abs_z = abs(d_local.z);
 
-    for (int i = 0; i < 6; ++i) {
-        vec3 d_cam = (params.inv_cam_transforms[i] * vec4(d_local, 0.0)).xyz;
-        if (d_cam.z < 0.0) { // Camera looks down -Z, so front is negative Z
-            float front_z = -d_cam.z;
-            float x_ndc = d_cam.x / front_z;
-            float y_ndc = d_cam.y / front_z;
-            
-            // Allow a small epsilon for floating-point margins
-            if (abs(x_ndc) <= 1.001 && abs(y_ndc) <= 1.001) {
-                if (front_z > max_z_front) {
-                    max_z_front = front_z;
-                    best_cam = i;
-                    best_x_ndc = x_ndc;
-                    best_y_ndc = y_ndc;
-                }
-            }
+    if (abs_x >= abs_y && abs_x >= abs_z) {
+        if (d_local.x > 0.0) {
+            best_cam = 0; // +X (Right)
+        } else {
+            best_cam = 1; // -X (Left)
+        }
+    } else if (abs_y >= abs_x && abs_y >= abs_z) {
+        if (d_local.y > 0.0) {
+            best_cam = 2; // +Y (Up)
+        } else {
+            best_cam = 3; // -Y (Down)
+        }
+    } else {
+        if (d_local.z > 0.0) {
+            best_cam = 4; // +Z (Back)
+        } else {
+            best_cam = 5; // -Z (Forward)
         }
     }
 
-    // If no camera face was found (edge case), output an empty point
-    if (best_cam == -1) {
+    // Project direction vector onto the selected camera face's local coordinate frame
+    vec3 d_cam = (params.inv_cam_transforms[best_cam] * vec4(d_local, 0.0)).xyz;
+    float front_z = -d_cam.z;
+    
+    // Ensure the projection is pointing in the camera's visual frustum
+    if (front_z <= 1e-4) {
         imageStore(lidar_out, xy, vec4(0.0, 0.0, 0.0, 0.0));
         return;
     }
+
+    float best_x_ndc = d_cam.x / front_z;
+    float best_y_ndc = d_cam.y / front_z;
 
     // 3. Load depth and intensity from the selected face texture
     // Texture coordinates have V=0 at the top (which corresponds to positive y_ndc)
@@ -145,15 +154,18 @@ void main() {
     }
 
     // 6. Add Gaussian noise along the ray
-    // Scale standard deviation based on:
-    // - Distance: noise scales quadratically with distance (signal attenuation)
-    // - Intensity: lower reflectivity or grazing angles (slanted surfaces) increase range uncertainty
-    float intensity_factor = 1.0 / max(intensity, 0.05);
-    float distance_factor = 1.0 + 0.001 * (dist * dist);
-    float effective_std_dev = params.noise_std_dev * intensity_factor * distance_factor;
+    float noisy_dist = dist;
+    if (params.noise_std_dev > 0.00001) {
+        // Scale standard deviation based on:
+        // - Distance: noise scales quadratically with distance (signal attenuation)
+        // - Intensity: lower reflectivity or grazing angles (slanted surfaces) increase range uncertainty
+        float intensity_factor = 1.0 / max(intensity, 0.05);
+        float distance_factor = 1.0 + 0.001 * (dist * dist);
+        float effective_std_dev = params.noise_std_dev * intensity_factor * distance_factor;
 
-    float noise = get_gaussian(vec2(xy), effective_std_dev);
-    float noisy_dist = max(dist + noise, params.min_range);
+        float noise = get_gaussian(vec2(xy), effective_std_dev);
+        noisy_dist = max(dist + noise, params.min_range);
+    }
     vec3 local_noisy_point = d_local * noisy_dist;
 
     // 7. Convert to ROS frame:

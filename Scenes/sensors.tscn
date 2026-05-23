@@ -141,3 +141,13 @@ lidar_topic = "/lidar_360"
 frame_id = "lidar_360"
 parent_frame_id = "base_link"
 metadata/_custom_type_script = "uid://b4hyl5cv4dkau"
+
+[node name="RosLidar361" type="Node3D" parent="." unique_id=348335696]
+transform = Transform3D(-0.2973416, 0, -0.95477116, 0, 1, 0, 0.95477116, 0, -0.2973416, 4.2119827, 13.830101, -31.948637)
+script = ExtResource("8_4r14p")
+vertical_resolution = 120
+max_range = 50.0
+lidar_topic = "/lidar2"
+frame_id = "lidar2"
+parent_frame_id = "base_link"
+metadata/_custom_type_script = "uid://b4hyl5cv4dkau"
