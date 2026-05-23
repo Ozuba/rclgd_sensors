@@ -7,6 +7,7 @@
 [ext_resource type="Script" uid="uid://ds4q43s0n1ft7" path="res://addons/rclgd-sensors/ros_camera/ros_camera.gd" id="5_e6vhw"]
 [ext_resource type="Material" uid="uid://bsv8ux5upf4hf" path="res://Assets/Textures/Asphalt/Asphalt.tres" id="6_8dfwh"]
 [ext_resource type="Texture2D" uid="uid://d2sohta4a0brk" path="res://Assets/Textures/Sky/kloofendal_48d_partly_cloudy_puresky_2k.exr" id="7_nl1mx"]
+[ext_resource type="Script" uid="uid://b4hyl5cv4dkau" path="res://addons/rclgd-sensors/ros_lidar_360/ros_lidar_360.gd" id="8_4r14p"]
 
 [sub_resource type="PhysicsMaterial" id="PhysicsMaterial_bqjsg"]
 rough = true
@@ -55,7 +56,7 @@ radius = 2.5
 [node name="SimScene" type="Node" unique_id=532534534]
 
 [node name="Freecam3D" type="Camera3D" parent="." unique_id=1156714283]
-transform = Transform3D(-0.2973416, 0, -0.95477116, 0, 1, 0, 0.95477116, 0, -0.2973416, -38.299828, 23.667015, -13.2959)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -38.299828, 23.667015, -13.2959)
 script = ExtResource("1_8dfwh")
 metadata/_custom_type_script = "uid://diysurgbljif6"
 
@@ -81,8 +82,18 @@ shadow_enabled = true
 environment = SubResource("Environment_ulqji")
 
 [node name="Cube" type="MeshInstance3D" parent="." unique_id=1300372416]
-transform = Transform3D(0.70710677, 0, 0.70710677, 0, 1, 0, -0.70710677, 0, 0.70710677, 0, 10, 0)
+transform = Transform3D(0.70710677, 0, 0.70710677, 0, 1, 0, -0.70710677, 0, 0.70710677, 3.6887283, 10, 14.590233)
 mesh = SubResource("BoxMesh_e6vhw")
+
+[node name="Cube2" type="MeshInstance3D" parent="." unique_id=970976832]
+transform = Transform3D(0, 0, 0.99999994, 0, 1, 0, -0.99999994, 0, 0, 0, 32.62353, 0)
+mesh = SubResource("BoxMesh_e6vhw")
+skeleton = NodePath("../Cube")
+
+[node name="Cube3" type="MeshInstance3D" parent="." unique_id=103777521]
+transform = Transform3D(-0.6964763, 0, 0.7175792, 0, 1, 0, -0.7175792, 0, -0.6964763, 27.431791, 30.499031, 16.042484)
+mesh = SubResource("BoxMesh_e6vhw")
+skeleton = NodePath("../Cube2")
 
 [node name="Ball" type="RigidBody3D" parent="." unique_id=1297725438]
 transform = Transform3D(1, 0, 0, 0, -4.3711385e-08, 0.99999994, 0, -0.99999994, -4.371139e-08, 0, 37.500717, -16.584454)
@@ -120,3 +131,13 @@ transform = Transform3D(-4.371139e-08, 0, -0.99999994, 0, 0.99999994, 0, 1, 0, -
 script = ExtResource("2_4r14p")
 frame_id = "lidar"
 metadata/_custom_type_script = "uid://cxrb8iam8llhk"
+
+[node name="RosLidar360" type="Node3D" parent="." unique_id=625640786]
+transform = Transform3D(-0.2973416, 0, -0.95477116, 0, 1, 0, 0.95477116, 0, -0.2973416, 4.211982, 8.837816, 11.334728)
+script = ExtResource("8_4r14p")
+vertical_resolution = 120
+max_range = 50.0
+lidar_topic = "/lidar_360"
+frame_id = "lidar_360"
+parent_frame_id = "base_link"
+metadata/_custom_type_script = "uid://b4hyl5cv4dkau"
