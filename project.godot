@@ -37,7 +37,7 @@ window/vsync/vsync_mode=0
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/rclgd/plugin.cfg")
+enabled=PackedStringArray("res://addons/gdgs/plugin.cfg", "res://addons/rclgd/plugin.cfg")
 
 [filesystem]
 

@@ -2,19 +2,20 @@ extends Node3D
 class_name RosGps
 
 # --- Configuration ---
+@export_group("Sensor Settings")
+@export var origin_lat: float = 42.8125 
+@export var origin_lon: float = -1.6458 
+@export var origin_alt: float = 450.0   
+@export var position_std: float = 0.5    # Horizontal jitter (meters)
+@export var altitude_std: float = 1.2    # Vertical jitter (meters)
+
 @export_group("ROS 2 Settings")
+@export var ros_namespace : String = ""
 @export var gps_rate: float = 10.0 
 @export var frame_id: String = "~/gps_link"
 @export var parent_frame_id: String = "~/base_link" # Path to the car's center
 
-@export_group("GPS Origin (WGS84)")
-@export var origin_lat: float = 42.8125 
-@export var origin_lon: float = -1.6458 
-@export var origin_alt: float = 450.0   
 
-@export_group("Noise Model (Standard Deviation)")
-@export var position_std: float = 0.5    # Horizontal jitter (meters)
-@export var altitude_std: float = 1.2    # Vertical jitter (meters)
 
 # --- WGS84 Constants ---
 const WGS84_A = 6378137.0

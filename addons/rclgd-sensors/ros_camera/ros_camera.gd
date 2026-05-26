@@ -2,7 +2,15 @@ extends Node3D
 class_name RosCamera
 
 # --- Configuration ---
+@export_group("Sensor Settings")
 @export var resolution: Vector2i = Vector2i(640, 480)
+@export var fov: float = 75.0
+@export var near: float = 0.05
+@export var far: float = 150.0
+@export_flags_3d_render var cull_mask: int = 1048575
+
+@export_group("ROS 2 Settings")
+@export var ros_namespace : String = ""
 @export var publish_rate: float = 15.0
 @export var frame_id: String = "camera_link"
 @export var parent_frame_id: String = "base_link"
@@ -34,7 +42,7 @@ func _ready() -> void:
 	_setup_internal_nodes()
 	
 	_node = RosNode.new()
-	_node.init(name.to_snake_case())
+	_node.init(name.to_snake_case(),ros_namespace.to_snake_case())
 	
 	_camera_pub = _node.create_publisher("~/image_raw", "sensor_msgs/msg/Image")
 	_camera_info_pub = _node.create_publisher("~/camera_info", "sensor_msgs/msg/CameraInfo")
@@ -57,11 +65,22 @@ func _setup_internal_nodes() -> void:
 	_viewport.name = "RosViewport"
 	_viewport.size = resolution
 	_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	
+	# Optimizations
+	_viewport.positional_shadow_atlas_size = 0
+	_viewport.screen_space_aa = SubViewport.SCREEN_SPACE_AA_DISABLED
+	_viewport.use_debanding = false
+	_viewport.use_hdr_2d = false
+	
 	add_child(_viewport)
 	
 	# 2. Create the Camera (Inside the viewport)
 	_camera = Camera3D.new()
 	_camera.name = "RosCamera3D"
+	_camera.fov = fov
+	_camera.near = near
+	_camera.far = far
+	_camera.cull_mask = cull_mask
 	_viewport.add_child(_camera)
 
 	# 3. Create the RemoteTransform3D (The sync bridge)
@@ -74,13 +93,14 @@ func _setup_internal_nodes() -> void:
 	_remote_transform.remote_path = _remote_transform.get_path_to(_camera)
 
 func _request_capture() -> void:
-	if is_requesting: return 
+	if not is_visible_in_tree() or is_requesting: return 
 		
 	is_requesting = true 
 	_current_stamp = _node.now()
 	
 	# Sync the TF right before we render to ensure the "photo" is taken at the correct spot
-	_tf_broadcaster.send_transform(global_transform, frame_id, parent_frame_id,false, _node.now())
+	# Use the exact same stamp as the image message to prevent synchronization lag
+	_tf_broadcaster.send_transform(global_transform, frame_id, parent_frame_id, false, _current_stamp)
 	
 	_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 	
