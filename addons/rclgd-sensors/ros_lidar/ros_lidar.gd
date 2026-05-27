@@ -261,7 +261,7 @@ func _on_timer_timeout():
 	_current_stamp = _node.now()
 	
 	# Update TF before render
-	_tf_broadcaster.send_transform(global_transform, frame_id, parent_frame_id, false)
+	_tf_broadcaster.send_transform(transform, frame_id, parent_frame_id, true)
 
 	# Determine which viewports need to be rendered based on FOV configuration
 	var render_mask = [false, false, false, false, false, false]
@@ -415,7 +415,7 @@ func _prepare_msg_template():
 	_cached_msg.height = 1
 	_cached_msg.is_dense = true
 	_cached_msg.point_step = 16 
-	_cached_msg.header.frame_id = frame_id
+	_cached_msg.header.frame_id = _node.resolve_frame(frame_id)
 	_cached_msg.fields = [
 		_create_field("x", 0, 7), _create_field("y", 4, 7),
 		_create_field("z", 8, 7), _create_field("intensity", 12, 7)
