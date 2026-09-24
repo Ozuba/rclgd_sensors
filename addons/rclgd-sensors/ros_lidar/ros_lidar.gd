@@ -78,6 +78,8 @@ func _ready() -> void:
 	# 3. ROS 2 Init
 	_node = RosNode.new()
 	_node.init(name.to_snake_case(),ros_namespace.to_snake_case())
+	var sensor_qos = RosQoS.new()
+	sensor_qos.reliability = RosQoS.BEST_EFFORT
 	_lidar_pub = _node.create_publisher(lidar_topic, "sensor_msgs/msg/PointCloud2")
 	_tf_broadcaster = _node.create_tf_broadcaster()
 

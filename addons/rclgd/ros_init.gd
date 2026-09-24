@@ -25,16 +25,19 @@ static func _static_init() -> void:
 				ros_params.append_array(["-p", "%s:=%s" % [key, res]])
 
 	if rclgd:
-		# Construimos el comando final: [Fixed Flags] + [Editor Params] + [CLI Overrides]
-		var final_args: PackedStringArray = ["--ros-args"]
-		final_args.append_array(ros_params)
-		final_args.append_array(cli_args)
-		
+		# CLI args go first, untouched: any --ros-args section they contain keeps
+		# working, and plain game args never land inside one (rclcpp rejects
+		# unknown ROS args). Project-settings params get their own section.
+		var final_args: PackedStringArray = cli_args.duplicate()
+		if not ros_params.is_empty():
+			final_args.append("--ros-args")
+			final_args.append_array(ros_params)
+
 		rclgd.init(final_args)
 		print("[ROS Init Args]: ", final_args)
-		
 
 func _exit_tree() -> void:
-	if rclgd and rclgd.ok():
-		#rclgd.shutdown()
-		print("[ROS] Shutdown called from exit_tree.")
+	# 3. Clean up when the game or scene closes.
+	if not Engine.is_editor_hint() and rclgd:
+		rclgd.shutdown()
+		print("[ROS] Context shut down safely.")
