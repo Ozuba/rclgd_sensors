@@ -53,7 +53,8 @@ void main() {
                 float df = 1.0 + 3.0 * params.distortion.x * t2 + 5.0 * params.distortion.y * t4 + 7.0 * params.distortion.z * t6 + 9.0 * params.distortion.w * t8;
                 theta -= f / df;
             }
-            phi = atan(p_offset.y / params.intrinsics.y, p_offset.x / params.intrinsics.x);
+            // Image rows grow downward, local +Y is up
+            phi = atan(-p_offset.y / params.intrinsics.y, p_offset.x / params.intrinsics.x);
         }
         
         // If the calculated theta exceeds the lens limit (FOV), paint it black
@@ -80,7 +81,8 @@ void main() {
             }
             
             theta = r * params.max_theta;
-            phi = atan(scaled_uv.y, scaled_uv.x);
+            // Image rows grow downward, local +Y is up
+            phi = atan(-scaled_uv.y, scaled_uv.x);
         } 
         else {
             // Equirectangular (Panorama 360)

@@ -7,12 +7,15 @@ layout(set=0, binding=0) uniform sampler2D depth_buffer;
 layout(set=0, binding=1) uniform sampler2D color_buffer;
 layout(set=0, binding=2, rgba32f) uniform restrict writeonly image2D face_out;
 
+layout(push_constant, std430) uniform Params {
+    mat4 inv_proj_matrix; // Inverse projection of the face camera, for this render
+} params;
+
+// View-space position of a depth-buffer sample (reversed-Z). ndc comes from pixel rows (y down);
+// the projection expects y up, as in DepthCapture.glsl and LidarStitch.glsl
 vec3 get_view_pos(vec2 ndc, float depth) {
-    // Vulkan NDC depth in reversed-Z:
-    // depth = 0.0 is far plane, depth = 1.0 is near plane.
-    // Reconstruct view-space depth (z_view is negative in front of camera)
-    float z_view = -0.1001 / (depth + 0.001);
-    return vec3(ndc * -z_view, z_view);
+    vec4 view_pos = params.inv_proj_matrix * vec4(ndc.x, -ndc.y, depth, 1.0);
+    return view_pos.xyz / view_pos.w;
 }
 
 void main() {
@@ -56,8 +59,9 @@ void main() {
     vec3 t2 = p_down - p;
     vec3 normal = normalize(cross(t1, t2));
 
-    // Compute angle of incidence (Lambertian cosine law)
-    float cos_theta = clamp(dot(normal, -ray_dir), 0.0, 1.0);
+    // Compute angle of incidence (Lambertian cosine law). abs(): the normal's sign depends on
+    // the winding of the two neighbor offsets
+    float cos_theta = clamp(abs(dot(normal, ray_dir)), 0.0, 1.0);
 
     // Reflected intensity
     float intensity = base_intensity * cos_theta;

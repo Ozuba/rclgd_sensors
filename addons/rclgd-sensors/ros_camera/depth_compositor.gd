@@ -28,7 +28,8 @@ func _notification(what: int) -> void:
 			rd.free_rid(nearest_sampler)
 		if _params_buffer.is_valid():
 			rd.free_rid(_params_buffer)
-		if _cached_uniform_set.is_valid():
+		# The uniform set is auto-freed by Godot when its textures/shader are freed (e.g. by RosCamera)
+		if _cached_uniform_set.is_valid() and rd.uniform_set_is_valid(_cached_uniform_set):
 			rd.free_rid(_cached_uniform_set)
 
 func _initialize_render_resources() -> void:
@@ -72,8 +73,9 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 		for view in range(render_scene_buffers.get_view_count()):
 			var depth_tex: RID = render_scene_buffers.get_depth_layer(view)
 
-			if depth_tex != _cached_depth_tex or not _cached_uniform_set.is_valid():
-				if _cached_uniform_set.is_valid():
+			var set_alive: bool = _cached_uniform_set.is_valid() and rd.uniform_set_is_valid(_cached_uniform_set)
+			if depth_tex != _cached_depth_tex or not set_alive:
+				if set_alive:
 					rd.free_rid(_cached_uniform_set)
 
 				_cached_depth_tex = depth_tex

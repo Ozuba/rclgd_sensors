@@ -28,10 +28,28 @@ layout(set=0, binding=6, std430) restrict buffer Params {
     mat4 inv_cam_transforms[6];
 } params;
 
-// Output texture containing ROS point cloud data (RGBA32F: RGB = XYZ in ROS, A = intensity)
-layout(set=0, binding=7, rgba32f) uniform restrict writeonly image2D lidar_out;
+// Output: PointCloud2 data, row-major (one row per beam). Each 20-byte point is
+// x, y, z, intensity (float32, ROS axes) + ring (uint16) + 2 bytes padding.
+layout(set=0, binding=7, std430) restrict writeonly buffer Points {
+    uint words[];
+} points;
 
 const float PI = 3.14159265359;
+const uint POINT_WORDS = 5u;
+
+// quiet NaN: the PointCloud2 "no point" (a function: GLSL consts can't use uintBitsToFloat)
+float no_return() {
+    return uintBitsToFloat(0x7fc00000u);
+}
+
+void store_point(ivec2 xy, vec3 ros_point, float intensity) {
+    uint base = (uint(xy.y) * uint(params.resolution.x) + uint(xy.x)) * POINT_WORDS;
+    points.words[base + 0u] = floatBitsToUint(ros_point.x);
+    points.words[base + 1u] = floatBitsToUint(ros_point.y);
+    points.words[base + 2u] = floatBitsToUint(ros_point.z);
+    points.words[base + 3u] = floatBitsToUint(intensity);
+    points.words[base + 4u] = uint(xy.y); // ring (little-endian uint16 + zero padding)
+}
 
 // Generate uniform random numbers
 float rand(vec2 co) {
@@ -99,7 +117,7 @@ void main() {
     
     // Ensure the projection is pointing in the camera's visual frustum
     if (front_z <= 1e-4) {
-        imageStore(lidar_out, xy, vec4(0.0, 0.0, 0.0, 0.0));
+        store_point(xy, vec3(no_return()), 0.0);
         return;
     }
 
@@ -132,7 +150,7 @@ void main() {
     // In Godot 4, Vulkan uses reversed-Z depth buffer (1.0 = near plane, 0.0 = far plane).
     // A depth of 0.0 (or very close) means nothing was hit (sky/far plane).
     if (depth_raw <= 0.0001) {
-        imageStore(lidar_out, xy, vec4(0.0, 0.0, 0.0, 0.0));
+        store_point(xy, vec3(no_return()), 0.0);
         return;
     }
 
@@ -149,7 +167,7 @@ void main() {
 
     // Apply range limits
     if (dist < params.min_range || dist > params.max_range) {
-        imageStore(lidar_out, xy, vec4(0.0, 0.0, 0.0, 0.0));
+        store_point(xy, vec3(no_return()), 0.0);
         return;
     }
 
@@ -178,5 +196,5 @@ void main() {
     ros_point.y = -local_noisy_point.x;
     ros_point.z = local_noisy_point.y;
 
-    imageStore(lidar_out, xy, vec4(ros_point, intensity));
+    store_point(xy, ros_point, intensity);
 }

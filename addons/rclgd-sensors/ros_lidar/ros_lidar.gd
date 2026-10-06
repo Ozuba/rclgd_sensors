@@ -1,8 +1,13 @@
-extends Node3D
+@icon("res://addons/rclgd-sensors/icons/ros_lidar.svg")
 class_name RosLidar
+extends RosSensor
+## Spinning lidar rendered as a cube map. Publishes an organized PointCloud2: one row per beam
+## (ring 0 = lowest), one column per azimuth step, with x, y, z, intensity and ring fields.
+## Beams without a return are NaN, so the cloud is not dense.
 
-# --- Constants ---
 const FACE_CAPTURE_EFFECT_CLASS = preload("res://addons/rclgd-sensors/ros_lidar/lidar_compositor.gd")
+## Bytes per point: x, y, z, intensity (float32) + ring (uint16) + 2 bytes padding, as LidarStitch.glsl writes them
+const POINT_STEP: int = 20
 
 # --- Configuration ---
 @export_group("Sensor Settings")
@@ -19,11 +24,9 @@ const FACE_CAPTURE_EFFECT_CLASS = preload("res://addons/rclgd-sensors/ros_lidar/
 @export_flags_3d_render var cull_mask: int = 1048575 # 3D Render layers to capture
 
 @export_group("ROS 2 Settings")
-@export var ros_namespace : String = ""
+## Scan rate (Hz), at most one scan per rendered frame
 @export var publish_rate: float = 10.0
 @export var lidar_topic: String = "~/lidar"
-@export var frame_id: String = "~lidar"
-@export var parent_frame_id: String = "~base_link"
 
 # --- Internal Nodes ---
 var _viewports: Array[SubViewport] = []
@@ -35,18 +38,15 @@ var _compositors: Array[Compositor] = []
 var _effects: Array[LidarFaceCompositorEffect] = []
 
 # --- ROS Components ---
-var _node: RosNode
 var _lidar_pub: RosPublisher
-var _tf_broadcaster: RosTfBroadcaster
-var _ros_timer: RosTimer
 
 # --- Rendering Components ---
 var _rd: RenderingDevice
 var _face_textures: Array[RID] = []
-var _output_texture_rid: RID
-var is_sampling: bool = false
+var _points_buffer: RID # Stitched scan, laid out as the PointCloud2 data
+var _queued_stamp: RosMsg # Stamp of the scan waiting for the next drawn frame (null = none)
+var _publish_queue: PublishQueue
 var _cached_msg: RosSensorMsgsPointCloud2
-var _current_stamp: RosMsg
 
 var _stitch_shader: RID
 var _stitch_pipeline: RID
@@ -58,7 +58,7 @@ var _params_float_array: PackedFloat32Array = PackedFloat32Array()
 var _lidar_environment: Environment
 var _actual_face_resolution: int = 256
 
-func _ready() -> void:
+func _sensor_ready() -> void:
 	# 1. Setup hardware rendering
 	_rd = RenderingServer.get_rendering_device()
 	_params_float_array.resize(300)
@@ -75,18 +75,11 @@ func _ready() -> void:
 	# 2. Pipeline hierarchy (Viewports and cameras)
 	_setup_rendering_pipeline()
 
-	# 3. ROS 2 Init
-	_node = RosNode.new()
-	_node.init(name.to_snake_case(),ros_namespace.to_snake_case())
-	var sensor_qos = RosQoS.new()
-	sensor_qos.reliability = RosQoS.BEST_EFFORT
-	_lidar_pub = _node.create_publisher(lidar_topic, "sensor_msgs/msg/PointCloud2")
-	_tf_broadcaster = _node.create_tf_broadcaster()
-
-	# 4. Start loop
+	# 3. ROS 2
+	_lidar_pub = _advertise(lidar_topic, "sensor_msgs/msg/PointCloud2")
 	_prepare_msg_template()
-	var interval: float = 1.0 / publish_rate
-	_ros_timer = _node.create_timer(interval, _on_timer_timeout)
+	_publish_queue = _create_publish_queue(_publish)
+	_start_sampling(publish_rate)
 
 func _setup_rendering_pipeline() -> void:
 	# Rotations for the 6 faces (+X, -X, +Y, -Y, +Z, -Z)
@@ -174,15 +167,8 @@ func _create_textures() -> void:
 						 RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
 		_face_textures.append(_rd.texture_create(fmt, RDTextureView.new()))
 		
-	# Output texture (RGBA32F: RGB = ROS Point, A = intensity)
-	var out_fmt : RDTextureFormat = RDTextureFormat.new()
-	out_fmt.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT 
-	out_fmt.width = horizontal_resolution
-	out_fmt.height = vertical_resolution
-	out_fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | \
-						 RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | \
-						 RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
-	_output_texture_rid = _rd.texture_create(out_fmt, RDTextureView.new())
+	# Output buffer: the scan as PointCloud2 data, so it is published without conversion
+	_points_buffer = _rd.storage_buffer_create(horizontal_resolution * vertical_resolution * POINT_STEP)
 
 func _init_shaders() -> void:
 	# 1. Stitching Shader
@@ -221,22 +207,27 @@ func _init_render_resources() -> void:
 	params_uniform.add_id(_params_buffer)
 	uniforms.append(params_uniform)
 	
-	var out_uniform = RDUniform.new()
-	out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-	out_uniform.binding = 7
-	out_uniform.add_id(_output_texture_rid)
-	uniforms.append(out_uniform)
+	var points_uniform = RDUniform.new()
+	points_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	points_uniform.binding = 7
+	points_uniform.add_id(_points_buffer)
+	uniforms.append(points_uniform)
 	
 	_stitch_uniform_set = _rd.uniform_set_create(uniforms, _stitch_shader, 0)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE and _rd:
+		# Free the uniform set first: freeing any of its dependencies (textures, buffer, shader)
+		# makes Godot free it automatically, so it may already be gone.
+		if _stitch_uniform_set.is_valid() and _rd.uniform_set_is_valid(_stitch_uniform_set):
+			_rd.free_rid(_stitch_uniform_set)
+
 		# Free texture RIDs
 		for tex in _face_textures:
 			if tex.is_valid():
 				_rd.free_rid(tex)
-		if _output_texture_rid.is_valid():
-			_rd.free_rid(_output_texture_rid)
+		if _points_buffer.is_valid():
+			_rd.free_rid(_points_buffer)
 		
 		# Free shaders
 		if _stitch_shader.is_valid():
@@ -244,11 +235,9 @@ func _notification(what: int) -> void:
 		if _face_capture_shader.is_valid():
 			_rd.free_rid(_face_capture_shader)
 			
-		# Free persistent RIDs
+		# Free persistent RIDs (pipelines are freed along with their shaders)
 		if _params_buffer.is_valid():
 			_rd.free_rid(_params_buffer)
-		if _stitch_uniform_set.is_valid():
-			_rd.free_rid(_stitch_uniform_set)
 
 func _intervals_overlap(min1: float, max1: float, min2: float, max2: float) -> bool:
 	return max1 >= min2 and min1 <= max2
@@ -256,14 +245,10 @@ func _intervals_overlap(min1: float, max1: float, min2: float, max2: float) -> b
 func _back_overlaps(min1: float, max1: float) -> bool:
 	return _intervals_overlap(min1, max1, 135.0, 180.0) or _intervals_overlap(min1, max1, -180.0, -135.0)
 
-func _on_timer_timeout():
-	if not is_visible_in_tree() or is_sampling or not _output_texture_rid.is_valid() or not _stitch_uniform_set.is_valid(): return
-		
-	is_sampling = true
-	_current_stamp = _node.now()
-	
-	# Update TF before render
-	_tf_broadcaster.send_transform(transform, frame_id, parent_frame_id, true)
+func _sample() -> void:
+	if not is_visible_in_tree() or _queued_stamp != null or not _stitch_uniform_set.is_valid(): return
+
+	_queued_stamp = _node.now()
 
 	# Determine which viewports need to be rendered based on FOV configuration
 	var render_mask = [false, false, false, false, false, false]
@@ -305,19 +290,25 @@ func _on_timer_timeout():
 	if not RenderingServer.frame_post_draw.is_connected(_on_frame_drawn):
 		RenderingServer.frame_post_draw.connect(_on_frame_drawn, CONNECT_ONE_SHOT)
 
+# Readbacks take a few frames to arrive. A new scan doesn't wait for them: each readback carries
+# its scan's stamp into the publish queue, which publishes in scan order.
 func _on_frame_drawn():
+	var stamp_ns := to_ns(_queued_stamp) # Callbacks bind only plain values (see RosSensor.to_ns)
+	_queued_stamp = null
+
 	# Serialize parameters on the main thread
 	var params_bytes = _get_params_byte_array()
 	
 	# Dispatch stitching shader on the render thread
-	RenderingServer.call_on_render_thread(_dispatch_stitching.bind(params_bytes))
+	RenderingServer.call_on_render_thread(_dispatch_stitching.bind(params_bytes, stamp_ns))
 
-func _dispatch_stitching(params_bytes: PackedByteArray) -> void:
-	if not _stitch_shader.is_valid() or not _stitch_pipeline.is_valid() or not _output_texture_rid.is_valid() or not _stitch_uniform_set.is_valid():
-		is_sampling = false
+func _dispatch_stitching(params_bytes: PackedByteArray, stamp_ns: int) -> void:
+	if not _stitch_shader.is_valid() or not _stitch_pipeline.is_valid() or not _points_buffer.is_valid() or not _stitch_uniform_set.is_valid():
 		return
 		
-	# Update the persistent parameter buffer with the new matrix/range/noise data
+	# Update the persistent parameter buffer with the new matrix/range/noise data.
+	# Buffer updates, dispatches and readbacks run in submission order, so overlapping scans are
+	# safe: each readback copies the points buffer before the next scan overwrites it.
 	_rd.buffer_update(_params_buffer, 0, params_bytes.size(), params_bytes)
 	
 	# Calculate groups (assuming local_size_x/y = 8 in the shader)
@@ -332,19 +323,16 @@ func _dispatch_stitching(params_bytes: PackedByteArray) -> void:
 	_rd.compute_list_end()
 	
 	# Request data asynchronously (sequenced after the compute commands)
-	var err = _rd.texture_get_data_async(_output_texture_rid, 0, _on_texture_data_ready)
-	if err != OK:
-		is_sampling = false
+	_rd.buffer_get_data_async(_points_buffer, _on_points_ready.bind(stamp_ns))
 
-func _on_texture_data_ready(raw_bytes: PackedByteArray):
-	is_sampling = false
-	if raw_bytes.is_empty(): return 
-	
-	_cached_msg.header.stamp = _current_stamp
-	_cached_msg.width = raw_bytes.size() / 16
-	_cached_msg.row_step = raw_bytes.size()
-	_cached_msg.data = raw_bytes 
-	
+func _on_points_ready(raw_bytes: PackedByteArray, stamp_ns: int) -> void:
+	if not raw_bytes.is_empty():
+		_publish_queue.push([stamp_ns, raw_bytes])
+
+# Runs on the queue's thread, one scan at a time, so it can reuse _cached_msg
+func _publish(stamp_ns: int, raw_bytes: PackedByteArray) -> void:
+	write_stamp(_cached_msg.header, stamp_ns)
+	_cached_msg.data = raw_bytes
 	_lidar_pub.publish(_cached_msg)
 
 func _get_params_byte_array() -> PackedByteArray:
@@ -412,15 +400,21 @@ func _write_transform_to_array(t: Transform3D, index: int) -> void:
 	_params_float_array[index + 14] = t.origin.z
 	_params_float_array[index + 15] = 1.0
 
-func _prepare_msg_template():
+func _prepare_msg_template() -> void:
 	_cached_msg = RosSensorMsgsPointCloud2.new()
-	_cached_msg.height = 1
-	_cached_msg.is_dense = true
-	_cached_msg.point_step = 16 
-	_cached_msg.header.frame_id = _node.resolve_frame(frame_id)
+	_cached_msg.header.frame_id = _frame
+	# Organized cloud: rows are beams, so consumers can walk neighbors along and across rings
+	_cached_msg.height = vertical_resolution
+	_cached_msg.width = horizontal_resolution
+	_cached_msg.point_step = POINT_STEP
+	_cached_msg.row_step = horizontal_resolution * POINT_STEP
+	_cached_msg.is_dense = false # Beams without a return are NaN
+	const FLOAT32 = 7
+	const UINT16 = 4
 	_cached_msg.fields = [
-		_create_field("x", 0, 7), _create_field("y", 4, 7),
-		_create_field("z", 8, 7), _create_field("intensity", 12, 7)
+		_create_field("x", 0, FLOAT32), _create_field("y", 4, FLOAT32),
+		_create_field("z", 8, FLOAT32), _create_field("intensity", 12, FLOAT32),
+		_create_field("ring", 16, UINT16),
 	]
 
 func _create_field(fname: String, offset: int, datatype: int) -> RosSensorMsgsPointField:

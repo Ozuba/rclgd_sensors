@@ -1,5 +1,8 @@
-extends Node3D
+@icon("res://addons/rclgd-sensors/icons/ros_fisheye_camera.svg")
 class_name RosFisheyeCamera
+extends RosSensor
+## Wide-angle camera rendered as a cube map and stitched into a circular fisheye (equidistant
+## model) or an equirectangular image. Images are in the optical frame "<frame>_optical".
 
 enum ProjectionType {
 	CIRCULAR_FISHEYE,
@@ -94,12 +97,8 @@ enum ProjectionType {
 		_update_cached_templates()
 
 @export_group("ROS 2 Settings")
-@export var ros_namespace : String = ""
+## Capture rate (Hz), at most one capture per rendered frame
 @export var publish_rate: float = 15.0
-@export var frame_id: String = "camera_link"
-@export var parent_frame_id: String = "base_link"
-@export var optical_frame_id: String = "camera_optical"
-
 
 # --- Internal Nodes ---
 var _viewports: Array[SubViewport] = []
@@ -107,19 +106,16 @@ var _cameras: Array[Camera3D] = []
 var _remote_syncs: Array[RemoteTransform3D] = []
 
 # --- ROS Components ---
-var _node: RosNode
 var _camera_pub: RosPublisher
 var _camera_info_pub: RosPublisher
-var _tf_broadcaster: RosTfBroadcaster
-var _ros_timer: RosTimer
 
 # --- Internal Variables ---
 var _cached_image_msg: RosSensorMsgsImage
 var _cached_info_msg: RosSensorMsgsCameraInfo
 var rd: RenderingDevice
-var is_requesting: bool = false
 var _resolved_optical_frame: String
-var _current_stamp: RosMsg
+var _queued_stamp: RosMsg # Stamp of the capture waiting for the next drawn frame (null = none)
+var _publish_queue: PublishQueue
 
 # --- Compute Shader Variables ---
 var _compute_shader_rid: RID
@@ -129,28 +125,19 @@ var _output_texture_size: Vector2i = Vector2i.ZERO
 var _sampler_rid: RID
 var _params_buffer_rid: RID
 
-var optical_tf = Transform3D(Basis(Vector3(0, 1, 0), Vector3(0, 0, -1), Vector3(-1, 0, 0)).orthonormalized(), Vector3.ZERO)
-
-func _ready() -> void:
+func _sensor_ready() -> void:
 	rd = RenderingServer.get_rendering_device()
-	
 	_setup_rendering_pipeline()
-	
-	_node = RosNode.new()
-	_node.init(name.to_snake_case(), ros_namespace.to_snake_case())
-	
-	_camera_pub = _node.create_publisher("~/image_raw", "sensor_msgs/msg/Image")
-	_camera_info_pub = _node.create_publisher("~/camera_info", "sensor_msgs/msg/CameraInfo")
-	_tf_broadcaster = _node.create_tf_broadcaster()
-	_resolved_optical_frame = _node.resolve_frame(optical_frame_id)
-	
+
+	var optical_frame := _frame_name() + "_optical"
+	_tf_broadcaster.send_transform(RosCamera.OPTICAL_TF, optical_frame, _frame_name(), true)
+	_resolved_optical_frame = _node.resolve_frame(optical_frame)
+
+	_camera_pub = _advertise("~/image_raw", "sensor_msgs/msg/Image")
+	_camera_info_pub = _advertise("~/camera_info", "sensor_msgs/msg/CameraInfo")
 	_cache_message_templates()
-	
-	# Initial TF publish
-	_tf_broadcaster.send_transform(optical_tf, optical_frame_id, frame_id, true)
-	
-	var interval: float = 1.0 / publish_rate
-	_ros_timer = _node.create_timer(interval, _request_capture)
+	_publish_queue = _create_publish_queue(_publish)
+	_start_sampling(publish_rate)
 
 func _setup_rendering_pipeline() -> void:
 	# Rotations for the 6 faces (+X, -X, +Y, -Y, +Z, -Z)
@@ -199,32 +186,37 @@ func _setup_rendering_pipeline() -> void:
 		sync.rotation = rotations[i]
 		_remote_syncs.append(sync)
 
-func _request_capture() -> void:
-	if not is_visible_in_tree() or is_requesting: return 
-		
-	is_requesting = true 
-	_current_stamp = _node.now()
-	
-	_tf_broadcaster.send_transform(transform, frame_id, parent_frame_id, true)
-	_tf_broadcaster.send_transform(optical_tf, optical_frame_id, frame_id, true)
-	
+func _sample() -> void:
+	if not is_visible_in_tree() or _queued_stamp != null: return
+
+	_queued_stamp = _node.now()
 	for vp in _viewports:
 		vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 		
 	if not RenderingServer.frame_post_draw.is_connected(_on_frame_drawn):
 		RenderingServer.frame_post_draw.connect(_on_frame_drawn, CONNECT_ONE_SHOT)
 
+# Readbacks take a few frames to arrive. A new capture doesn't wait for them: each readback
+# carries its capture's stamp into the publish queue, which publishes in capture order.
 func _on_frame_drawn() -> void:
-	_run_compute_shader()
+	var stamp_ns := to_ns(_queued_stamp) # Callbacks bind only plain values (see RosSensor.to_ns)
+	_queued_stamp = null
+	_run_compute_shader(stamp_ns)
 
-func _on_data_received(data: PackedByteArray) -> void:
+func _on_data_received(data: PackedByteArray, stamp_ns: int) -> void:
 	if not data.is_empty():
-		_cached_image_msg.header.stamp = _current_stamp
-		_cached_image_msg.data = data
-		_cached_info_msg.header.stamp = _current_stamp
-		_camera_pub.publish(_cached_image_msg)
-		_camera_info_pub.publish(_cached_info_msg)
-	is_requesting = false
+		# Hand over the current templates: the property setters may replace them meanwhile
+		_publish_queue.push([stamp_ns, data, _cached_image_msg, _cached_info_msg])
+
+# Copying image data into the message and publishing it is expensive, so it runs on the
+# queue's thread. The queue publishes one capture at a time, so it can reuse the templates.
+func _publish(stamp_ns: int, data: PackedByteArray, image_msg: RosSensorMsgsImage,
+		info_msg: RosSensorMsgsCameraInfo) -> void:
+	write_stamp(image_msg.header, stamp_ns)
+	image_msg.data = data
+	write_stamp(info_msg.header, stamp_ns)
+	_camera_pub.publish(image_msg)
+	_camera_info_pub.publish(info_msg)
 
 func _update_cached_templates() -> void:
 	if _node:
@@ -253,7 +245,7 @@ func _cache_message_templates() -> void:
 		_cached_info_msg.distortion_model = "equidistant"
 		if not use_custom_calibration:
 			var max_theta = deg_to_rad(fov / 2.0)
-			var radius = min(resolution.x, resolution.y) / 2.0
+			var radius = resolution.y / 2.0 # The shader fits the image circle to the height
 			fx_val = radius / max_theta
 			fy_val = fx_val
 			cx_val = resolution.x / 2.0
@@ -286,16 +278,14 @@ func _exit_tree() -> void:
 		if _compute_shader_rid.is_valid():
 			rd.free_rid(_compute_shader_rid)
 
-func _run_compute_shader() -> void:
+func _run_compute_shader(stamp_ns: int) -> void:
 	if not _compute_shader_rid.is_valid():
 		_init_compute_shader()
 		if not _compute_shader_rid.is_valid():
-			is_requesting = false
 			return
 			
 	_ensure_output_texture()
 	if not _output_texture_rid.is_valid():
-		is_requesting = false
 		return
 		
 	var face_rids: Array[RID] = []
@@ -303,7 +293,6 @@ func _run_compute_shader() -> void:
 		var tex = _viewports[i].get_texture()
 		var face_rid = RenderingServer.texture_get_rd_texture(tex.get_rid())
 		if not face_rid.is_valid():
-			is_requesting = false
 			return
 		face_rids.append(face_rid)
 		
@@ -322,7 +311,7 @@ func _run_compute_shader() -> void:
 	var k4_val = k4
 	
 	if not use_custom_calibration:
-		var radius = min(resolution.x, resolution.y) / 2.0
+		var radius = resolution.y / 2.0 # The shader fits the image circle to the height
 		fx_val = radius / max_theta
 		fy_val = fx_val
 		cx_val = resolution.x / 2.0
@@ -350,11 +339,10 @@ func _run_compute_shader() -> void:
 	])
 	var params_bytes = params_array.to_byte_array()
 	
-	RenderingServer.call_on_render_thread(_dispatch_stitching.bind(face_rids, params_bytes))
+	RenderingServer.call_on_render_thread(_dispatch_stitching.bind(face_rids, params_bytes, stamp_ns))
 
-func _dispatch_stitching(face_rids: Array[RID], params_bytes: PackedByteArray) -> void:
+func _dispatch_stitching(face_rids: Array[RID], params_bytes: PackedByteArray, stamp_ns: int) -> void:
 	if not _compute_shader_rid.is_valid() or not _pipeline_rid.is_valid() or not _output_texture_rid.is_valid():
-		is_requesting = false
 		return
 		
 	if not _sampler_rid.is_valid():
@@ -406,10 +394,10 @@ func _dispatch_stitching(face_rids: Array[RID], params_bytes: PackedByteArray) -
 	var y_groups = int(ceil(float(resolution.y) / 8.0))
 	rd.compute_list_dispatch(compute_list, x_groups, y_groups, 1)
 	rd.compute_list_end()
+	# A new set is built every capture; RenderingDevice defers the free until the GPU is done with it
+	rd.free_rid(uniform_set)
 	
-	var err = rd.texture_get_data_async(_output_texture_rid, 0, _on_data_received)
-	if err != OK:
-		is_requesting = false
+	rd.texture_get_data_async(_output_texture_rid, 0, _on_data_received.bind(stamp_ns))
 
 func _init_compute_shader() -> void:
 	var shader_file = load("res://addons/rclgd-sensors/ros_fisheye_camera/FisheyeStitch.glsl")

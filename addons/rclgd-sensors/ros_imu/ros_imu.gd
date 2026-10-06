@@ -1,124 +1,119 @@
-extends Node3D
+@icon("res://addons/rclgd-sensors/icons/ros_imu.svg")
 class_name RosImu
+extends RosSensor
+## IMU mounted on the nearest RigidBody3D ancestor (e.g. the car). Measures proper acceleration
+## and angular velocity at its own position, with white noise and random-walk biases, plus its
+## orientation. Samples every physics tick and publishes at publish_rate.
 
-# --- Configuration ---
 @export_group("Sensor Settings")
-@export var gravity_constant: float = 9.81 
+## Accelerometer white noise (m/s²)
 @export var accel_noise_std: float = 0.05
+## Gyroscope white noise (rad/s)
 @export var gyro_noise_std: float = 0.005
+## Orientation noise (rad, per axis)
+@export var orientation_noise_std: float = 0.002
+## Bias random walk, applied to both the accelerometer and the gyroscope (units per √s)
 @export var bias_drift_std: float = 0.0001
-@export var lpf_tau: float = 0.15 # Low-pass filter for physics jitter
+## Time constant (s) of the accelerometer low-pass filter, which smooths the spikes of the
+## physics solver. 0 disables it.
+@export var lpf_tau: float = 0.01
 
 @export_group("ROS 2 Settings")
-@export var ros_namespace : String = ""
-@export var imu_rate: float = 100.0 
-@export var frame_id: String = "~/imu_link"
-@export var parent_frame_id: String = "~/base_link"
+## Publish rate (Hz). Samples come from physics ticks, so it is capped at the physics tick rate.
+@export var publish_rate: float = 100.0
 
-
-
-# --- Internal State ---
-var is_initialized: bool = false
-var _last_velocity: Vector3 = Vector3.ZERO
-var _lpf_accel: Vector3 = Vector3.ZERO
-
-var _accel_bias: Vector3 = Vector3.ZERO
-var _gyro_bias: Vector3 = Vector3.ZERO
-
-var noisy_accel: Vector3
-var noisy_gyro: Vector3
-var current_quat: Quaternion
-
-# --- ROS Components ---
-var _node: RosNode
+var _body: RigidBody3D
 var _imu_pub: RosPublisher
-var _tf_broadcaster: RosTfBroadcaster
-var _timer: RosTimer
-var _msg: RosSensorMsgsImu
+var _msg := RosSensorMsgsImu.new()
 
-func _ready() -> void:
-	_node = RosNode.new()
-	_node.init(name.to_snake_case(),ros_namespace.to_snake_case())
-	_imu_pub = _node.create_publisher("~/data", "sensor_msgs/msg/Imu")
-	_timer = _node.create_timer(1.0 / imu_rate, _publish_imu)
-	
-	_tf_broadcaster = _node.create_tf_broadcaster()
-	_tf_broadcaster.send_transform(transform, frame_id, parent_frame_id, true)
-	
-	_msg = RosSensorMsgsImu.new()
-	_fill_static_covariances()
-	
-	is_initialized = true
+var _has_last_velocity: bool = false # The first tick has no previous velocity to differentiate
+var _last_velocity: Vector3
+var _accel: Vector3 # Low-passed proper acceleration, sensor axes
+var _gyro: Vector3 # Angular velocity, sensor axes
+var _accel_bias: Vector3
+var _gyro_bias: Vector3
+var _since_publish: float = 0.0
+
+func _sensor_ready() -> void:
+	_body = _find_body()
+	if not _body:
+		push_warning("%s: no RigidBody3D ancestor to measure, the IMU won't publish" % name)
+	if publish_rate > Engine.physics_ticks_per_second:
+		push_warning("%s: publish_rate %.0f Hz is above the physics tick rate (%d Hz) and will be capped"
+				% [name, publish_rate, Engine.physics_ticks_per_second])
+
+	_imu_pub = _advertise("~/data", "sensor_msgs/msg/Imu")
+	_msg.header.frame_id = _frame
+	_fill_covariances()
 
 func _physics_process(delta: float) -> void:
-	if not is_initialized: return
-	var parent_body = get_parent() as RigidBody3D
-	if not parent_body: return
+	if not _body or not _imu_pub:
+		return
+	var state := PhysicsServer3D.body_get_direct_state(_body.get_rid())
 
-	# 1. Calculate Proper Acceleration (Global Space)
-	var current_velocity = parent_body.linear_velocity
-	var raw_accel = (current_velocity - _last_velocity) / delta
-	_last_velocity = current_velocity
-	var proper_accel_g = raw_accel + Vector3(0, gravity_constant, 0)
-	
-	# 2. Transform to local sensor-space
-	var inv_basis = global_transform.basis.inverse()
-	var local_accel = inv_basis * proper_accel_g
-	var local_gyro = inv_basis * parent_body.angular_velocity
-	
-	# 3. Apply Low-Pass Filter (LPF)
-	# Physics engines create "spikes" that break Factor Graphs; LPF smooths them.
-	_lpf_accel = _lpf_accel.lerp(local_accel, 1.0 - lpf_tau)
+	# Differentiate the velocity of the mount point, not of the center of mass: that adds the
+	# tangential (α×r) and centripetal (ω×(ω×r)) acceleration an off-center IMU feels
+	var velocity := state.get_velocity_at_local_position(global_position - _body.global_position)
+	if not _has_last_velocity:
+		_last_velocity = velocity
+		_has_last_velocity = true
+		return
+	# An accelerometer measures proper acceleration: kinematic acceleration minus gravity
+	var accel_world := (velocity - _last_velocity) / delta - _body.get_gravity()
+	_last_velocity = velocity
 
-	# 4. Update Random Walk Biases
-	# CRITICAL: Drift must scale with sqrt(delta) for mathematical consistency.
-	var drift_scale = sqrt(delta)
-	_accel_bias += _get_noise_vec(bias_drift_std * drift_scale)
-	_gyro_bias += _get_noise_vec(bias_drift_std * drift_scale)
+	var to_sensor := global_basis.orthonormalized().inverse()
+	var accel := to_sensor * accel_world
+	_accel = _accel.lerp(accel, 1.0 - exp(-delta / lpf_tau)) if lpf_tau > 0.0 else accel
+	_gyro = to_sensor * state.angular_velocity
 
-	# 5. Final Noisy Readings
-	noisy_accel = _lpf_accel + _accel_bias + _get_noise_vec(accel_noise_std)
-	noisy_gyro = local_gyro + _gyro_bias + _get_noise_vec(gyro_noise_std)
-	current_quat = Quaternion(global_transform.basis)
+	var drift := bias_drift_std * sqrt(delta)
+	_accel_bias += _noise(drift)
+	_gyro_bias += _noise(drift)
 
-func _publish_imu() -> void:
+	# Publish on the tick closest to each publish period
+	var period := 1.0 / publish_rate
+	_since_publish += delta
+	if _since_publish + delta * 0.5 >= period:
+		_since_publish = clampf(_since_publish - period, 0.0, period)
+		_publish()
+
+func _publish() -> void:
 	_msg.header.stamp = _node.now()
-	_msg.header.frame_id = _node.resolve_frame(frame_id)
-	
-	# --- Coordinate Mapping: (Godot x,y,z) -> (ROS z,x,y) ---
-	# As per your request for the specific mapping:
-	_msg.linear_acceleration.x = -noisy_accel.z
-	_msg.linear_acceleration.y = -noisy_accel.x
-	_msg.linear_acceleration.z = noisy_accel.y
-	
-	_msg.angular_velocity.x = -noisy_gyro.z
-	_msg.angular_velocity.y = -noisy_gyro.x
-	_msg.angular_velocity.z = noisy_gyro.y
-	
-	# --- Orientation Mapping ---
-	var ros_quat = Quaternion(
-		-current_quat.z,
-		-current_quat.x,
-		current_quat.y,
-		current_quat.w
-	)
-	#print(ros_basis.get_euler())
-	
-	_msg.orientation.x = ros_quat.x
-	_msg.orientation.y = ros_quat.y
-	_msg.orientation.z = ros_quat.z
-	_msg.orientation.w = ros_quat.w
-	
+	_set_xyz(_msg.linear_acceleration, to_ros(_accel + _accel_bias + _noise(accel_noise_std)))
+	_set_xyz(_msg.angular_velocity, to_ros(_gyro + _gyro_bias + _noise(gyro_noise_std)))
+
+	var orientation := global_basis.get_rotation_quaternion() \
+			* Quaternion.from_euler(_noise(orientation_noise_std))
+	var q := to_ros_quat(orientation)
+	_msg.orientation.x = q.x
+	_msg.orientation.y = q.y
+	_msg.orientation.z = q.z
+	_msg.orientation.w = q.w
+
 	_imu_pub.publish(_msg)
 
-func _fill_static_covariances() -> void:
-	# GTSAM requires non-zero diagonals in the covariance matrix
-	var a_var = pow(accel_noise_std, 2)
-	var g_var = pow(gyro_noise_std, 2)
-	
-	for i in range(3):
-		_msg.linear_acceleration_covariance[i * 4] = a_var
-		_msg.angular_velocity_covariance[i * 4] = g_var
+func _fill_covariances() -> void:
+	# All zeros means "unknown" in ROS, and GTSAM needs non-zero diagonals: keep a floor.
+	# Message arrays are copies: assign whole arrays, element writes would be lost.
+	_msg.linear_acceleration_covariance = _diagonal(accel_noise_std)
+	_msg.angular_velocity_covariance = _diagonal(gyro_noise_std)
+	_msg.orientation_covariance = _diagonal(orientation_noise_std)
 
-func _get_noise_vec(std: float) -> Vector3:
-	return Vector3(randfn(0, std), randfn(0, std), randfn(0, std))
+static func _diagonal(std: float) -> PackedFloat64Array:
+	var variance := maxf(std * std, 1e-9)
+	return PackedFloat64Array([variance, 0.0, 0.0, 0.0, variance, 0.0, 0.0, 0.0, variance])
+
+func _find_body() -> RigidBody3D:
+	var node := get_parent()
+	while node and not node is RigidBody3D:
+		node = node.get_parent()
+	return node as RigidBody3D
+
+static func _set_xyz(target: RosMsg, v: Vector3) -> void:
+	target.x = v.x
+	target.y = v.y
+	target.z = v.z
+
+static func _noise(std: float) -> Vector3:
+	return Vector3(randfn(0.0, std), randfn(0.0, std), randfn(0.0, std))

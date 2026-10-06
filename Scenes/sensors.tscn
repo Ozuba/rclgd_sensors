@@ -7,7 +7,9 @@
 [ext_resource type="Script" uid="uid://ds4q43s0n1ft7" path="res://addons/rclgd-sensors/ros_camera/ros_camera.gd" id="5_e6vhw"]
 [ext_resource type="Material" uid="uid://bsv8ux5upf4hf" path="res://Assets/Textures/Asphalt/Asphalt.tres" id="6_8dfwh"]
 [ext_resource type="Texture2D" uid="uid://d2sohta4a0brk" path="res://Assets/Textures/Sky/kloofendal_48d_partly_cloudy_puresky_2k.exr" id="7_nl1mx"]
+[ext_resource type="Script" uid="uid://bkjvra1is3vqt" path="res://addons/rclgd-sensors/ros_fisheye_camera/ros_fisheye_camera.gd" id="9_22lcj"]
 [ext_resource type="PackedScene" uid="uid://cxgdoj8uri1rv" path="res://Assets/Models/sponza/Sponza.gltf" id="9_onmwi"]
+[ext_resource type="Script" uid="uid://dox0g252g0p2b" path="res://Scenes/FpsOverlay/fps_overlay.gd" id="10_fps"]
 
 [sub_resource type="PhysicsMaterial" id="PhysicsMaterial_bqjsg"]
 rough = true
@@ -111,6 +113,18 @@ parent_frame_id = "map"
 metadata/_custom_type_script = "uid://cxrb8iam8llhk"
 
 [node name="RosCamera" type="Node3D" parent="." unique_id=232875283]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 19.68442, 7.0823364, 11.001414)
+transform = Transform3D(0.031425074, -0.29108027, 0.9561824, 0.009561233, 0.95669866, 0.2909232, -0.9994604, 0, 0.032847412, 22.969444, 9.689226, 8.779771)
 script = ExtResource("5_e6vhw")
+publish_rate = 60.0
 metadata/_custom_type_script = "uid://ds4q43s0n1ft7"
+
+[node name="RosFisheyeCamera" type="Node3D" parent="." unique_id=1556473817]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 17.024519, 13.08645, 10.221597)
+script = ExtResource("9_22lcj")
+projection_type = 1
+fov = 360.0
+face_resolution = 1080
+metadata/_custom_type_script = "uid://bkjvra1is3vqt"
+
+[node name="FpsOverlay" type="CanvasLayer" parent="." unique_id=1171070261]
+script = ExtResource("10_fps")
